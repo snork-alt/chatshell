@@ -9,7 +9,7 @@ use crossterm::event::Event;
 use futures::stream::StreamExt;
 use nix::sys::signal::Signal;
 use std::io::{Read, Write};
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,7 +110,7 @@ impl ChatShell {
         let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         // Task to read from shell and send to terminal
-        let pty_fd = self.pty.master_fd;
+        let pty_fd = self.pty.master.as_raw_fd();
         let output_tx_clone = output_tx.clone();
         let running_clone = self.running.clone();
         
@@ -149,7 +149,7 @@ impl ChatShell {
         });
 
         // Task to write to shell from input queue
-        let pty_fd_write = self.pty.master_fd;
+        let pty_fd_write = self.pty.master.as_raw_fd();
         let running_clone = self.running.clone();
         
         tokio::spawn(async move {

@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 #[derive(Debug)]
 pub struct Terminal {
     stdout: Stdout,
-    raw_mode_enabled: bool,
+    pub raw_mode_enabled: bool, // Made public for testing
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,18 +36,23 @@ impl KeyInput {
     pub fn matches_pattern(&self, pattern: &str) -> bool {
         let pattern_lower = pattern.to_lowercase();
         
-        // Parse pattern like "ctrl+;" or "alt+enter"
+        // Parse pattern like "ctrl+;" or "alt+enter" or just "esc"
         let parts: Vec<&str> = pattern_lower.split('+').collect();
-        if parts.len() < 2 {
+        
+        let (modifier_parts, key_part) = if parts.len() == 1 {
+            // Single key without modifiers
+            (vec![], parts[0])
+        } else if parts.len() >= 2 {
+            // Key with modifiers
+            let (modifiers, keys) = parts.split_at(parts.len() - 1);
+            (modifiers.to_vec(), keys[0])
+        } else {
             return false;
-        }
-
-        let (modifier_parts, key_part) = parts.split_at(parts.len() - 1);
-        let key_part = key_part[0];
+        };
 
         // Check if modifiers match
         let mut expected_modifiers = KeyModifiers::empty();
-        for modifier in modifier_parts {
+        for modifier in &modifier_parts {
             match *modifier {
                 "ctrl" => expected_modifiers |= KeyModifiers::CONTROL,
                 "alt" => expected_modifiers |= KeyModifiers::ALT,
@@ -83,8 +88,13 @@ impl KeyInput {
         match (code, modifiers.contains(KeyModifiers::CONTROL)) {
             (KeyCode::Char(c), true) => {
                 // Control characters
-                let control_code = (c.to_ascii_uppercase() as u8) - b'A' + 1;
-                vec![control_code]
+                if c.is_ascii_alphabetic() {
+                    let control_code = (c.to_ascii_uppercase() as u8) - b'A' + 1;
+                    vec![control_code]
+                } else {
+                    // For non-alphabetic characters with Ctrl, use the character as-is
+                    vec![c as u8]
+                }
             }
             (KeyCode::Char(c), false) => {
                 if modifiers.contains(KeyModifiers::ALT) {
