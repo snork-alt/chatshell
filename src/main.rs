@@ -31,6 +31,7 @@ struct ChatShell {
 
 impl ChatShell {
     pub async fn new(config_path: Option<String>) -> Result<Self> {
+        eprintln!("[DEBUG] Loading config...");
         // Load or create configuration
         let config_path = if let Some(path) = config_path {
             path
@@ -41,28 +42,40 @@ impl ChatShell {
         let config = Config::load_from_file(&config_path)
             .with_context(|| format!("Failed to load config from {}", config_path))?;
 
+        eprintln!("[DEBUG] Config loaded, shell: {}", config.shell.command);
+
         // Initialize terminal
+        eprintln!("[DEBUG] Initializing terminal...");
         let mut terminal = Terminal::new()
             .with_context(|| "Failed to initialize terminal")?;
 
         // Enable raw mode to capture all keystrokes
+        eprintln!("[DEBUG] Entering raw mode...");
         terminal.enter_raw_mode()
             .with_context(|| "Failed to enter raw mode")?;
 
         // Spawn shell process
+        eprintln!("[DEBUG] Spawning shell process...");
         let pty = PtySession::spawn(&config.shell)
             .with_context(|| "Failed to spawn shell process")?;
 
+        eprintln!("[DEBUG] Shell process spawned successfully");
+
         // Set up signal handling
+        eprintln!("[DEBUG] Setting up signal handlers...");
         let running = Arc::new(AtomicBool::new(true));
         Self::setup_signal_handlers(running.clone())?;
 
         // Initialize hook manager
+        eprintln!("[DEBUG] Initializing hook manager...");
         let hook_manager = HookManager::from_configs(config.hooks.clone());
 
         // Resize PTY to match terminal size
+        eprintln!("[DEBUG] Resizing PTY...");
         let (cols, rows) = terminal.size()?;
         pty.resize_pty(rows, cols)?;
+
+        eprintln!("[DEBUG] ChatShell initialization complete");
 
         Ok(ChatShell {
             config,
@@ -106,145 +119,64 @@ impl ChatShell {
         // Show brief welcome message
         let shell_name = self.config.shell.command.split('/').last().unwrap_or("shell");
         eprintln!("\x1b[90m[ChatShell wrapping {}]\x1b[0m", shell_name);
-        eprintln!("[DEBUG] Starting event loop...");
         
-        // Create channels for communication between tasks
-        let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-
-        // Task to read from shell and send to terminal
-        eprintln!("[DEBUG] Setting up shell output task...");
-        let pty_fd = self.pty.master.as_raw_fd();
-        let output_tx_clone = output_tx.clone();
-        let running_clone = self.running.clone();
-        
-        tokio::spawn(async move {
-            let mut buffer = [0u8; 4096];
-            loop {
-                if !running_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                // Use blocking read with non-blocking fd
-                let mut file = unsafe { std::fs::File::from_raw_fd(pty_fd) };
-                match file.read(&mut buffer) {
-                    Ok(n) if n > 0 => {
-                        if output_tx_clone.send(buffer[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(_) => {
-                        // EOF - shell process ended
-                        running_clone.store(false, Ordering::Relaxed);
-                        break;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        // No data available, continue
-                    }
-                    Err(_) => {
-                        // Read error
-                        running_clone.store(false, Ordering::Relaxed);
-                        break;
-                    }
-                }
-                std::mem::forget(file); // Don't close the fd
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        });
-
-        // Task to write to shell from input queue
-        eprintln!("[DEBUG] Setting up input task...");
-        let pty_fd_write = self.pty.master.as_raw_fd();
-        let running_clone = self.running.clone();
-        
-        tokio::spawn(async move {
-            while let Some(data) = input_rx.recv().await {
-                if !running_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let mut file = unsafe { std::fs::File::from_raw_fd(pty_fd_write) };
-                if file.write_all(&data).is_err() {
-                    running_clone.store(false, Ordering::Relaxed);
-                    break;
-                }
-                std::mem::forget(file); // Don't close the fd
-            }
-        });
-
         // Wait a moment for shell to initialize and display initial prompt
-        eprintln!("[DEBUG] Waiting for shell initialization...");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        eprintln!("[DEBUG] Starting main event loop...");
-
-        // Main event loop
-        while self.running.load(Ordering::Relaxed) {
-            select! {
-                // Handle terminal input
-                _ = self.handle_terminal_input(&input_tx) => {},
-                
-                // Handle shell output
-                output = output_rx.recv() => {
-                    if let Some(data) = output {
-                        if self.terminal.write(&data).is_err() {
-                            break;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        
+        // Simple event loop - just forward data between terminal and shell
+        let mut shell_buffer = [0u8; 4096];
+        
+        loop {
+            // Check if child process is still alive
+            if !self.pty.is_child_alive() {
+                break;
+            }
+            
+            // Handle terminal input (non-blocking)
+            if self.terminal.poll_event(Duration::from_millis(1))? {
+                match self.terminal.read_event()? {
+                    Event::Key(key_event) => {
+                        let key_input = KeyInput::from_event(key_event);
+                        
+                        // Check if any hook should handle this key
+                        if let Ok(true) = self.hook_manager.process_key(&key_input) {
+                            // Hook consumed the key, don't forward to shell
+                            continue;
                         }
-                    } else {
-                        break; // Channel closed
+
+                        // Forward key to shell
+                        if !key_input.raw_bytes.is_empty() {
+                            use std::os::unix::io::AsRawFd;
+                            use nix::unistd::write;
+                            let _ = write(self.pty.master.as_raw_fd(), &key_input.raw_bytes);
+                        }
                     }
-                }
-                
-                // Check if child process is still alive
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if !self.pty.is_child_alive() {
-                        break;
+                    Event::Resize(cols, rows) => {
+                        let _ = self.pty.resize_pty(rows, cols);
                     }
+                    _ => {}
                 }
             }
+            
+            // Handle shell output (non-blocking)
+            use std::os::unix::io::AsRawFd;
+            use nix::unistd::read;
+            match read(self.pty.master.as_raw_fd(), &mut shell_buffer) {
+                Ok(n) if n > 0 => {
+                    let _ = self.terminal.write(&shell_buffer[..n]);
+                }
+                Ok(_) => break, // EOF
+                Err(nix::errno::Errno::EAGAIN) => {
+                    // No data available, continue
+                }
+                Err(_) => break, // Error
+            }
+            
+            // Small sleep to prevent busy waiting
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
         self.cleanup().await?;
-        Ok(())
-    }
-
-    async fn handle_terminal_input(&mut self, input_tx: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>) -> Result<()> {
-        // Check for terminal events with a short timeout
-        if self.terminal.poll_event(Duration::from_millis(10))? {
-            match self.terminal.read_event()? {
-                Event::Key(key_event) => {
-                    let key_input = KeyInput::from_event(key_event);
-                    
-                    // Check if any hook should handle this key
-                    match self.hook_manager.process_key(&key_input) {
-                        Ok(true) => {
-                            // Hook consumed the key, don't forward to shell
-                            return Ok(());
-                        }
-                        Ok(false) => {
-                            // No hook consumed the key, forward to shell
-                        }
-                        Err(_e) => {
-                            // Hook processing error - continue and forward to shell
-                            // Error suppressed to maintain shell transparency
-                        }
-                    }
-
-                    // Forward key to shell
-                    if !key_input.raw_bytes.is_empty() {
-                        input_tx.send(key_input.raw_bytes)?;
-                    }
-                }
-                Event::Resize(cols, rows) => {
-                    // Resize PTY to match new terminal size
-                    if let Err(e) = self.pty.resize_pty(rows, cols) {
-                        eprintln!("Failed to resize PTY: {}", e);
-                    }
-                }
-                _ => {
-                    // Ignore other events (mouse, etc.)
-                }
-            }
-        }
         Ok(())
     }
 
@@ -293,6 +225,12 @@ async fn main() -> Result<()> {
                 .help("Create a default configuration file and exit")
                 .action(clap::ArgAction::SetTrue)
         )
+        .arg(
+            Arg::new("test-init")
+                .long("test-init")
+                .help("Test initialization only and exit")
+                .action(clap::ArgAction::SetTrue)
+        )
         .get_matches();
 
     // Handle create-config option
@@ -317,6 +255,13 @@ async fn main() -> Result<()> {
     if let Some(shell_cmd) = matches.get_one::<String>("shell") {
         shell.config.shell.command = shell_cmd.clone();
         shell.config.shell.args = vec!["-i".to_string()]; // Interactive mode
+    }
+
+    // Handle test-init option
+    if matches.get_flag("test-init") {
+        eprintln!("[DEBUG] Test initialization completed successfully");
+        shell.cleanup().await?;
+        return Ok(());
     }
 
     // Run the shell wrapper

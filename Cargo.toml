@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 crossterm = "0.27"
-nix = { version = "0.27", features = ["process", "signal", "term"] }
+nix = { version = "0.27", features = ["process", "signal", "term", "fs"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 clap = { version = "4.0", features = ["derive"] }

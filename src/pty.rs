@@ -7,6 +7,7 @@ use std::ffi::CString;
 use std::os::unix::io::{AsRawFd, OwnedFd};
 use anyhow::{Context, Result};
 use crate::config::ShellConfig;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 
 #[derive(Debug)]
 pub struct PtySession {
@@ -23,6 +24,12 @@ impl PtySession {
             Ok(result) => {
                 match result.fork_result {
                     ForkResult::Parent { child } => {
+                        // Set the master PTY to non-blocking mode
+                        let flags = fcntl(result.master.as_raw_fd(), FcntlArg::F_GETFL)?;
+                        let mut flags = OFlag::from_bits_truncate(flags);
+                        flags.insert(OFlag::O_NONBLOCK);
+                        fcntl(result.master.as_raw_fd(), FcntlArg::F_SETFL(flags))?;
+                        
                         // Parent process - return the PTY session
                         Ok(PtySession {
                             master: result.master,
