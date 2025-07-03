@@ -44,21 +44,14 @@ impl PtySession {
     }
 
     fn exec_shell(shell_config: &ShellConfig) -> Result<()> {
-        // Ensure key environment variables are preserved for proper shell initialization
-        let important_env_vars = [
-            "HOME", "USER", "USERNAME", "LOGNAME", "PATH", "SHELL", "TERM", 
-            "PS1", "PS2", "PS3", "PS4", "PROMPT_COMMAND", "PWD", "OLDPWD",
-            "LANG", "LC_ALL", "LC_CTYPE", "SHLVL"
-        ];
-        
-        // Preserve important environment variables if they exist
-        for var in &important_env_vars {
-            if let Ok(value) = std::env::var(var) {
-                std::env::set_var(var, value);
-            }
+        // Preserve ALL environment variables from parent process
+        // This ensures conda environments, custom prompts, and other shell-specific 
+        // configurations are maintained
+        for (key, value) in std::env::vars() {
+            std::env::set_var(key, value);
         }
         
-        // Set environment variables if specified in config
+        // Override with any config-specified environment variables
         if let Some(env) = &shell_config.env {
             for (key, value) in env {
                 std::env::set_var(key, value);
@@ -72,7 +65,21 @@ impl PtySession {
         let mut args: Vec<CString> = Vec::new();
         args.push(command.clone()); // argv[0] should be the command itself
         
-        for arg in &shell_config.args {
+        // If no specific args provided, use shell-appropriate defaults
+        let shell_args = if shell_config.args.is_empty() {
+            // Auto-detect appropriate arguments based on shell type
+            if shell_config.command.contains("zsh") {
+                vec!["-i".to_string(), "-l".to_string()] // Interactive + login shell
+            } else if shell_config.command.contains("bash") {
+                vec!["-i".to_string(), "-l".to_string()] // Interactive + login shell  
+            } else {
+                vec!["-i".to_string()] // Just interactive for other shells
+            }
+        } else {
+            shell_config.args.clone()
+        };
+        
+        for arg in &shell_args {
             args.push(CString::new(arg.clone())
                 .with_context(|| format!("Invalid argument: {}", arg))?);
         }

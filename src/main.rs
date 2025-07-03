@@ -1,4 +1,4 @@
-THIS SHOULD BE A LINTER ERRORmod config;
+mod config;
 mod pty;
 mod terminal;
 mod hooks;
@@ -167,6 +167,9 @@ impl ChatShell {
                 std::mem::forget(file); // Don't close the fd
             }
         });
+
+        // Wait a moment for shell to initialize and display initial prompt
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Main event loop
         while self.running.load(Ordering::Relaxed) {

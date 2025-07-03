@@ -28,10 +28,13 @@ pub struct HookConfig {
 
 impl Default for Config {
     fn default() -> Self {
+        // Detect the user's actual shell
+        let user_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        
         Config {
             shell: ShellConfig {
-                command: "/bin/bash".to_string(),
-                args: vec!["-i".to_string()], // Interactive mode
+                command: user_shell,
+                args: vec![], // Let pty.rs auto-detect appropriate arguments
                 env: None,
             },
             hooks: vec![
