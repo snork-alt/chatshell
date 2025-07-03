@@ -44,7 +44,21 @@ impl PtySession {
     }
 
     fn exec_shell(shell_config: &ShellConfig) -> Result<()> {
-        // Set environment variables if specified
+        // Ensure key environment variables are preserved for proper shell initialization
+        let important_env_vars = [
+            "HOME", "USER", "USERNAME", "LOGNAME", "PATH", "SHELL", "TERM", 
+            "PS1", "PS2", "PS3", "PS4", "PROMPT_COMMAND", "PWD", "OLDPWD",
+            "LANG", "LC_ALL", "LC_CTYPE", "SHLVL"
+        ];
+        
+        // Preserve important environment variables if they exist
+        for var in &important_env_vars {
+            if let Ok(value) = std::env::var(var) {
+                std::env::set_var(var, value);
+            }
+        }
+        
+        // Set environment variables if specified in config
         if let Some(env) = &shell_config.env {
             for (key, value) in env {
                 std::env::set_var(key, value);

@@ -1,4 +1,4 @@
-mod config;
+THIS SHOULD BE A LINTER ERRORmod config;
 mod pty;
 mod terminal;
 mod hooks;
@@ -103,6 +103,9 @@ impl ChatShell {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        // Show brief welcome message
+        eprintln!("\x1b[90m[ChatShell active - Press Ctrl+; for help]\x1b[0m");
+        
         // Create channels for communication between tasks
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
