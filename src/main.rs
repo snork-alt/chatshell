@@ -104,7 +104,8 @@ impl ChatShell {
 
     pub async fn run(&mut self) -> Result<()> {
         // Show brief welcome message
-        eprintln!("\x1b[90m[ChatShell active - Press Ctrl+; for help]\x1b[0m");
+        let shell_name = self.config.shell.command.split('/').last().unwrap_or("shell");
+        eprintln!("\x1b[90m[ChatShell wrapping {}]\x1b[0m", shell_name);
         
         // Create channels for communication between tasks
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
