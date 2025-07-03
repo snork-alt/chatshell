@@ -1,4 +1,5 @@
-THIS SHOULD BE A LINTER ERRORuse nix::pty::{forkpty, ForkptyResult};
+use nix::pty::forkpty;
+use nix::unistd::ForkResult;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{execvp, Pid};
@@ -17,23 +18,27 @@ pub struct PtySession {
 impl PtySession {
     pub fn spawn(shell_config: &ShellConfig) -> Result<Self> {
         // Create PTY pair
-        let fork_result = forkpty(None, None);
+        let fork_result = unsafe { forkpty(None, None) };
 
         match fork_result {
-            Ok(Some(result)) => {
-                // Parent process - return the PTY session
-                Ok(PtySession {
-                    master_fd: result.master.as_raw_fd(),
-                    child_pid: result.fork_result,
-                })
-            }
-            Ok(None) => {
-                // Child process - exec the shell
-                Self::exec_shell(shell_config)
-                    .with_context(|| "Failed to exec shell")?;
-                
-                // This should never be reached
-                std::process::exit(1);
+            Ok(result) => {
+                match result.fork_result {
+                    ForkResult::Parent { child } => {
+                        // Parent process - return the PTY session
+                        Ok(PtySession {
+                            master_fd: result.master.as_raw_fd(),
+                            child_pid: child,
+                        })
+                    }
+                    ForkResult::Child => {
+                        // Child process - exec the shell
+                        Self::exec_shell(shell_config)
+                            .with_context(|| "Failed to exec shell")?;
+                        
+                        // This should never be reached
+                        std::process::exit(1);
+                    }
+                }
             }
             Err(e) => Err(anyhow::anyhow!("forkpty failed: {}", e)),
         }
