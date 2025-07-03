@@ -103,8 +103,6 @@ impl ChatShell {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        println!("ChatShell started. Press Ctrl+; for help.");
-        
         // Create channels for communication between tasks
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -187,7 +185,6 @@ impl ChatShell {
                 // Check if child process is still alive
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
                     if !self.pty.is_child_alive() {
-                        println!("\rShell process ended.");
                         break;
                     }
                 }
@@ -214,9 +211,9 @@ impl ChatShell {
                         Ok(false) => {
                             // No hook consumed the key, forward to shell
                         }
-                        Err(e) => {
-                            eprintln!("Hook processing error: {}", e);
-                            // Continue and forward to shell
+                        Err(_e) => {
+                            // Hook processing error - continue and forward to shell
+                            // Error suppressed to maintain shell transparency
                         }
                     }
 
