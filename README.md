@@ -309,12 +309,201 @@ RUST_LOG=debug ./chatshell
 - Configuration files should have appropriate permissions (600)
 - Be careful with hook commands that might expose sensitive data
 
+## Testing and Debugging
+
+### Running Tests
+
+ChatShell includes comprehensive tests to validate all functionality:
+
+#### Quick Start Testing
+
+```bash
+# Run a quick smoke test
+cargo test test_special_key_conversion
+
+# Verify hook system works
+cargo test test_hook_system
+
+# Run all unit tests (fast)
+cargo test --lib
+
+# Run all tests (including slower integration tests)
+cargo test
+```
+
+#### Automated Tests
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific test categories
+cargo test --test integration_tests    # Integration tests
+cargo test --test property_tests       # Property-based tests  
+cargo test --test benchmark_tests      # Performance benchmarks
+
+# Run tests with output
+cargo test -- --nocapture
+
+# Run tests in single-threaded mode (for PTY tests)
+cargo test -- --test-threads=1
+```
+
+#### Manual Testing
+
+For interactive testing of terminal functionality:
+
+```bash
+# Run the manual test suite
+cd tests
+./manual_test_script.sh
+```
+
+This script will guide you through testing:
+- Basic shell functionality
+- Special key handling (arrows, function keys, etc.)
+- Complex program interaction (vi, nano, etc.)
+- Hook system functionality
+- Stress testing with rapid input
+
+#### Debug Mode
+
+Run ChatShell with debug information:
+
+```bash
+# Build in debug mode
+cargo build
+
+# Run with debug output
+RUST_LOG=debug ./target/debug/chatshell
+
+# Or use the debug helper
+cd tests
+./debug_helper.sh
+```
+
+### Keystroke Validation
+
+The test suite validates that all keystrokes are properly captured and forwarded:
+
+- **Special Keys**: Arrow keys, function keys (F1-F12), Home/End, Page Up/Down
+- **Control Combinations**: Ctrl+A through Ctrl+Z
+- **Alt Combinations**: Alt+key combinations  
+- **Complex Modifiers**: Ctrl+Shift+key, Alt+Shift+key, etc.
+- **Terminal Sequences**: Proper ANSI escape sequences for all special keys
+
+### VI Editor Testing
+
+Specific tests ensure seamless vi/vim operation:
+
+```bash
+# Test vi interaction
+cargo test test_vi_editor_interaction
+
+# Manual vi test - run ChatShell then:
+vi test.txt
+# Test insert mode, navigation, save/quit
+```
+
+### Hook System Testing  
+
+Validate hook functionality:
+
+```bash
+# Test hook processing
+cargo test test_hook_system
+
+# Test pattern matching
+cargo test test_hook_pattern_edge_cases
+
+# Manual hook testing - run ChatShell then:
+# Try: Ctrl+; (should show help)
+```
+
+### Performance Testing
+
+Benchmark key processing performance:
+
+```bash
+# Run performance tests
+cargo test --test benchmark_tests -- --nocapture
+```
+
+The performance tests validate:
+- Key conversion speed (should be < 1ms for 10k keys)
+- Pattern matching speed (should be < 10ms for 10k comparisons)  
+- Hook processing speed (should be < 100ms for 1k keys)
+- Sequential processing (should handle > 1000 keys/sec)
+
+### Troubleshooting
+
+If you encounter issues:
+
+1. **Run the debug helper**:
+   ```bash
+   cd tests
+   ./debug_helper.sh
+   ```
+
+2. **Check system compatibility**:
+   ```bash
+   # Verify terminal support
+   echo $TERM
+   echo $TERM_PROGRAM
+   
+   # Check for required tools
+   which bash vi
+   ```
+
+3. **Test basic functionality**:
+   ```bash
+   cargo test test_pty_shell_spawning
+   cargo test test_special_key_conversion
+   ```
+
+4. **Enable verbose logging**:
+   ```bash
+   RUST_LOG=debug cargo run
+   ```
+
+5. **Test individual components**:
+   ```bash
+   # Test terminal handling
+   cargo test test_terminal_state
+   
+   # Test PTY functionality  
+   cargo test test_pty_resize
+   
+   # Test hook system
+   cargo test test_custom_hook_execution
+   ```
+
+### Known Issues and Limitations
+
+- Some terminal emulators may handle certain key combinations differently
+- Performance may vary with very rapid input (>10,000 keys/sec)
+- Complex Unicode sequences might need additional testing
+- Window resizing during heavy I/O may have slight delays
+
+### Test Coverage
+
+The test suite covers:
+- ✅ All special key mappings (arrows, function keys, etc.)
+- ✅ Control and Alt key combinations  
+- ✅ Complex terminal applications (vi, nano)
+- ✅ Hook pattern matching and execution
+- ✅ PTY management and process lifecycle
+- ✅ Configuration loading and validation
+- ✅ Signal handling and cleanup
+- ✅ Performance under load
+- ✅ Error conditions and edge cases
+
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests if applicable
+4. Add tests if applicable (see testing section above)
 5. Submit a pull request
 
 ### Development Setup
@@ -326,6 +515,13 @@ cargo build
 cargo test
 cargo run -- --create-config
 cargo run
+
+# Run the full test suite
+cargo test --all
+
+# Run manual tests
+cd tests
+./manual_test_script.sh
 ```
 
 ## License

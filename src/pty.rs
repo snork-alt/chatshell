@@ -4,14 +4,13 @@ use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{execvp, Pid};
 use std::ffi::CString;
-use std::io::{Read, Write};
-use std::os::unix::io::{AsRawFd, RawFd, FromRawFd};
+use std::os::unix::io::{AsRawFd, OwnedFd};
 use anyhow::{Context, Result};
 use crate::config::ShellConfig;
 
 #[derive(Debug)]
 pub struct PtySession {
-    pub master_fd: RawFd,
+    pub master: OwnedFd,
     pub child_pid: Pid,
 }
 
@@ -26,7 +25,7 @@ impl PtySession {
                     ForkResult::Parent { child } => {
                         // Parent process - return the PTY session
                         Ok(PtySession {
-                            master_fd: result.master.as_raw_fd(),
+                            master: result.master,
                             child_pid: child,
                         })
                     }
@@ -72,19 +71,17 @@ impl PtySession {
     }
 
     pub fn write_to_shell(&self, data: &[u8]) -> Result<usize> {
-        let mut file = unsafe { std::fs::File::from_raw_fd(self.master_fd) };
-        let result = file.write(data)
-            .with_context(|| "Failed to write to shell");
-        std::mem::forget(file); // Don't close the fd
-        result
+        use nix::unistd::write;
+        write(self.master.as_raw_fd(), data)
+            .map(|n| n as usize)
+            .with_context(|| "Failed to write to shell")
     }
 
     pub fn read_from_shell(&self, buffer: &mut [u8]) -> Result<usize> {
-        let mut file = unsafe { std::fs::File::from_raw_fd(self.master_fd) };
-        let result = file.read(buffer)
-            .with_context(|| "Failed to read from shell");
-        std::mem::forget(file); // Don't close the fd
-        result
+        use nix::unistd::read;
+        read(self.master.as_raw_fd(), buffer)
+            .map(|n| n as usize)
+            .with_context(|| "Failed to read from shell")
     }
 
     pub fn resize_pty(&self, rows: u16, cols: u16) -> Result<()> {
@@ -98,7 +95,7 @@ impl PtySession {
         };
 
         let result = unsafe {
-            ioctl(self.master_fd, TIOCSWINSZ, &ws as *const winsize)
+            ioctl(self.master.as_raw_fd(), TIOCSWINSZ, &ws as *const winsize)
         };
 
         if result == -1 {
@@ -142,10 +139,7 @@ impl Drop for PtySession {
             }
         }
         
-        // Close the master fd
-        unsafe {
-            libc::close(self.master_fd);
-        }
+        // PtyMaster will automatically close the file descriptor when dropped
     }
 }
 
