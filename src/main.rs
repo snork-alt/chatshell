@@ -106,12 +106,14 @@ impl ChatShell {
         // Show brief welcome message
         let shell_name = self.config.shell.command.split('/').last().unwrap_or("shell");
         eprintln!("\x1b[90m[ChatShell wrapping {}]\x1b[0m", shell_name);
+        eprintln!("[DEBUG] Starting event loop...");
         
         // Create channels for communication between tasks
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         // Task to read from shell and send to terminal
+        eprintln!("[DEBUG] Setting up shell output task...");
         let pty_fd = self.pty.master.as_raw_fd();
         let output_tx_clone = output_tx.clone();
         let running_clone = self.running.clone();
@@ -151,6 +153,7 @@ impl ChatShell {
         });
 
         // Task to write to shell from input queue
+        eprintln!("[DEBUG] Setting up input task...");
         let pty_fd_write = self.pty.master.as_raw_fd();
         let running_clone = self.running.clone();
         
@@ -170,7 +173,9 @@ impl ChatShell {
         });
 
         // Wait a moment for shell to initialize and display initial prompt
+        eprintln!("[DEBUG] Waiting for shell initialization...");
         tokio::time::sleep(Duration::from_millis(100)).await;
+        eprintln!("[DEBUG] Starting main event loop...");
 
         // Main event loop
         while self.running.load(Ordering::Relaxed) {
