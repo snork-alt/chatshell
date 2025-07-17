@@ -1,5 +1,6 @@
 use crate::config::HookConfig;
 use crate::terminal::KeyInput;
+use crate::window::WindowManager;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
@@ -16,6 +17,7 @@ pub enum ActionType {
 #[derive(Debug)]
 pub struct HookManager {
     hooks: HashMap<String, Hook>,
+    window_manager: WindowManager,
 }
 
 #[derive(Debug)]
@@ -50,15 +52,15 @@ impl Hook {
         key.matches_pattern(&self.config.key_combination)
     }
 
-    pub fn execute(&self, key: &KeyInput) -> Result<bool> {
+    pub fn execute(&self, key: &KeyInput, window_manager: &mut WindowManager) -> Result<bool> {
         match &self.action {
-            ActionType::Command(cmd) => self.execute_command(cmd),
-            ActionType::Function(func_name) => self.execute_function(func_name, key),
-            ActionType::Builtin(builtin_name) => self.execute_builtin(builtin_name, key),
+            ActionType::Command(cmd) => self.execute_command(cmd, window_manager),
+            ActionType::Function(func_name) => self.execute_function(func_name, key, window_manager),
+            ActionType::Builtin(builtin_name) => self.execute_builtin(builtin_name, key, window_manager),
         }
     }
 
-    fn execute_command(&self, cmd: &str) -> Result<bool> {
+    fn execute_command(&self, cmd: &str, window_manager: &mut WindowManager) -> Result<bool> {
         let output = Command::new("/bin/sh")
             .arg("-c")
             .arg(cmd)
@@ -67,70 +69,74 @@ impl Hook {
             .output()
             .with_context(|| format!("Failed to execute command: {}", cmd))?;
 
-        if !output.status.success() {
+        let content = if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Hook command failed: {}", stderr);
+            format!("Command failed:\n{}", stderr)
         } else {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.trim().is_empty() {
-                println!("{}", stdout.trim());
+            if stdout.trim().is_empty() {
+                "Command executed successfully (no output)".to_string()
+            } else {
+                stdout.trim().to_string()
             }
-        }
+        };
+
+        // Show result in popup window
+        window_manager.show_popup(&format!("Command: {}", cmd), &content)?;
 
         // Return true to indicate the hook consumed the key event
         Ok(true)
     }
 
-    fn execute_function(&self, func_name: &str, _key: &KeyInput) -> Result<bool> {
-        // In a real implementation, this could call into a scripting engine
-        // or dynamically loaded plugins
+    fn execute_function(&self, func_name: &str, _key: &KeyInput, window_manager: &mut WindowManager) -> Result<bool> {
         match func_name {
             "show_help" => {
-                println!("\n=== ChatShell Help ===");
-                println!("This is a transparent shell wrapper.");
-                println!("All keystrokes are passed through to the underlying shell.");
-                println!("Special key combinations can trigger hooks:");
-                println!("- Ctrl+; : Example hook (configured in config.toml)");
-                println!("=======================\n");
+                let content = "=== ChatShell Help ===\n\nThis is a transparent shell wrapper.\nAll keystrokes are passed through to the underlying shell.\n\nSpecial key combinations can trigger hooks:\n- Ctrl+; : Show this help\n- Ctrl+T : Show current time\n- Ctrl+Shift+C : Show config info\n\nPress ESC to close this window.";
+                window_manager.show_popup("Help", content)?;
                 Ok(true)
             }
             "show_time" => {
                 let now = chrono::Utc::now();
-                println!("\nCurrent time: {}\n", now.format("%Y-%m-%d %H:%M:%S UTC"));
+                let content = format!("Current time:\n{}\n\nLocal time:\n{}", 
+                    now.format("%Y-%m-%d %H:%M:%S UTC"),
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z"));
+                window_manager.show_popup("Current Time", &content)?;
                 Ok(true)
             }
             _ => {
-                eprintln!("Unknown function: {}", func_name);
+                let content = format!("Unknown function: {}", func_name);
+                window_manager.show_popup("Error", &content)?;
                 Ok(false)
             }
         }
     }
 
-    fn execute_builtin(&self, builtin_name: &str, _key: &KeyInput) -> Result<bool> {
+    fn execute_builtin(&self, builtin_name: &str, _key: &KeyInput, window_manager: &mut WindowManager) -> Result<bool> {
         match builtin_name {
             "clear_screen" => {
+                // For clear screen, we don't need a popup - just execute the action
                 print!("\x1B[2J\x1B[H"); // ANSI clear screen and move cursor to home
                 Ok(true)
             }
             "show_config" => {
-                println!("\n=== Current Hook Configuration ===");
-                println!("Name: {}", self.config.name);
-                println!("Key: {}", self.config.key_combination);
-                println!("Action: {}", self.config.action);
-                println!("Enabled: {}", self.config.enabled);
-                if let Some(desc) = &self.config.description {
-                    println!("Description: {}", desc);
-                }
-                println!("=================================\n");
+                let content = format!("=== Current Hook Configuration ===\n\nName: {}\nKey: {}\nAction: {}\nEnabled: {}\n{}",
+                    self.config.name,
+                    self.config.key_combination,
+                    self.config.action,
+                    self.config.enabled,
+                    self.config.description.as_ref().map(|d| format!("Description: {}", d)).unwrap_or_default()
+                );
+                window_manager.show_popup("Configuration", &content)?;
                 Ok(true)
             }
             "toggle_hook" => {
-                // This would need access to the hook manager to toggle
-                println!("\nHook toggle not implemented in this context\n");
+                let content = "Hook toggle not implemented in this context";
+                window_manager.show_popup("Toggle Hook", content)?;
                 Ok(false)
             }
             _ => {
-                eprintln!("Unknown builtin: {}", builtin_name);
+                let content = format!("Unknown builtin: {}", builtin_name);
+                window_manager.show_popup("Error", &content)?;
                 Ok(false)
             }
         }
@@ -141,6 +147,7 @@ impl HookManager {
     pub fn new() -> Self {
         HookManager {
             hooks: HashMap::new(),
+            window_manager: WindowManager::default(),
         }
     }
 
@@ -178,10 +185,10 @@ impl HookManager {
         }
     }
 
-    pub fn process_key(&self, key: &KeyInput) -> Result<bool> {
+    pub fn process_key(&mut self, key: &KeyInput) -> Result<bool> {
         for hook in self.hooks.values() {
             if hook.matches(key) {
-                match hook.execute(key) {
+                match hook.execute(key, &mut self.window_manager) {
                     Ok(consumed) => {
                         if consumed {
                             return Ok(true); // Key was consumed by hook

@@ -2,6 +2,7 @@ mod config;
 mod pty;
 mod terminal;
 mod hooks;
+mod window;
 
 use anyhow::{Context, Result};
 use clap::{Arg, Command};
