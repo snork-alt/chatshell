@@ -3,10 +3,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use anyhow::{Context, Result};
+use crate::llm::LlmConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub shell: ShellConfig,
+    pub llm: LlmConfig,
     pub hooks: Vec<HookConfig>,
 }
 
@@ -34,6 +36,7 @@ impl Default for Config {
                 args: vec!["-i".to_string()], // Interactive mode
                 env: None,
             },
+            llm: LlmConfig::default(),
             hooks: vec![
                 HookConfig {
                     name: "example_hook".to_string(),

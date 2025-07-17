@@ -1,9 +1,12 @@
 use crate::config::HookConfig;
 use crate::terminal::KeyInput;
 use crate::window::WindowManager;
+use crate::llm::{LlmService, LlmResponse};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub type HookAction = Box<dyn Fn(&KeyInput) -> Result<bool> + Send + Sync>;
 
@@ -12,12 +15,15 @@ pub enum ActionType {
     Command(String),
     Function(String),
     Builtin(String),
+    LlmPrompt,
+    LlmReset,
 }
 
 #[derive(Debug)]
 pub struct HookManager {
     hooks: HashMap<String, Hook>,
     window_manager: WindowManager,
+    llm_service: Option<Arc<Mutex<LlmService>>>,
 }
 
 #[derive(Debug)]
@@ -39,6 +45,10 @@ impl Hook {
             ActionType::Function(action_str[3..].to_string())
         } else if action_str.starts_with("builtin:") {
             ActionType::Builtin(action_str[8..].to_string())
+        } else if action_str == "llm:prompt" {
+            ActionType::LlmPrompt
+        } else if action_str == "llm:reset" {
+            ActionType::LlmReset
         } else {
             // Default to command
             ActionType::Command(action_str.to_string())
@@ -52,11 +62,13 @@ impl Hook {
         key.matches_pattern(&self.config.key_combination)
     }
 
-    pub fn execute(&self, key: &KeyInput, window_manager: &mut WindowManager) -> Result<bool> {
+    pub async fn execute(&self, key: &KeyInput, window_manager: &mut WindowManager, llm_service: &Option<Arc<Mutex<LlmService>>>) -> Result<bool> {
         match &self.action {
             ActionType::Command(cmd) => self.execute_command(cmd, window_manager),
             ActionType::Function(func_name) => self.execute_function(func_name, key, window_manager),
             ActionType::Builtin(builtin_name) => self.execute_builtin(builtin_name, key, window_manager),
+            ActionType::LlmPrompt => self.execute_llm_prompt(window_manager, llm_service).await,
+            ActionType::LlmReset => self.execute_llm_reset(window_manager, llm_service).await,
         }
     }
 
@@ -141,6 +153,106 @@ impl Hook {
             }
         }
     }
+
+    async fn execute_llm_prompt(&self, window_manager: &mut WindowManager, llm_service: &Option<Arc<Mutex<LlmService>>>) -> Result<bool> {
+        let Some(llm_service) = llm_service else {
+            window_manager.show_popup("Error", "LLM service not available. Please check your configuration.")?;
+            return Ok(true);
+        };
+
+        // Show input popup for user prompt
+        match window_manager.show_input_popup("LLM Assistant", "Enter your prompt:") {
+            Ok(Some(user_prompt)) => {
+                // Process the prompt with LLM
+                let mut llm = llm_service.lock().await;
+                match llm.process_user_prompt(&user_prompt).await {
+                    Ok(LlmResponse::TextResponse { content }) => {
+                        window_manager.show_popup("LLM Response", &content)?;
+                    }
+                    Ok(LlmResponse::CommandRequest { command, explanation, tool_call_id }) => {
+                        // Show command for user to edit/confirm
+                        let prompt = format!("Command: {}\nExplanation: {}\n\nEdit command if needed:", command, explanation);
+                        match window_manager.show_input_popup("Execute Command", &prompt) {
+                            Ok(Some(final_command)) => {
+                                // Execute the command
+                                match Self::execute_shell_command(&final_command) {
+                                    Ok(output) => {
+                                        // Send result back to LLM
+                                        match llm.process_command_result(&tool_call_id, &final_command, &output, true).await {
+                                            Ok(LlmResponse::TextResponse { content }) => {
+                                                window_manager.show_popup("Command Result", &content)?;
+                                            }
+                                            Ok(LlmResponse::CommandRequest { command, explanation, tool_call_id: _ }) => {
+                                                // Handle follow-up commands recursively (for now, just show)
+                                                window_manager.show_popup("Follow-up Command", &format!("{}\n\n{}", explanation, command))?;
+                                            }
+                                            Err(e) => {
+                                                window_manager.show_popup("LLM Error", &format!("Error processing command result: {}", e))?;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let error_msg = format!("Command execution failed: {}", e);
+                                        window_manager.show_popup("Command Error", &error_msg)?;
+                                        // Also inform LLM of the failure
+                                        let _ = llm.process_command_result(&tool_call_id, &final_command, &error_msg, false).await;
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                // User cancelled
+                                window_manager.show_popup("Cancelled", "Command execution cancelled.")?;
+                            }
+                            Err(e) => {
+                                window_manager.show_popup("Error", &format!("Error showing command popup: {}", e))?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        window_manager.show_popup("LLM Error", &format!("Error processing prompt: {}", e))?;
+                    }
+                }
+            }
+            Ok(None) => {
+                // User cancelled
+            }
+            Err(e) => {
+                window_manager.show_popup("Error", &format!("Error showing input popup: {}", e))?;
+            }
+        }
+
+        Ok(true)
+    }
+
+    async fn execute_llm_reset(&self, window_manager: &mut WindowManager, llm_service: &Option<Arc<Mutex<LlmService>>>) -> Result<bool> {
+        let Some(llm_service) = llm_service else {
+            window_manager.show_popup("Error", "LLM service not available.")?;
+            return Ok(true);
+        };
+
+        let mut llm = llm_service.lock().await;
+        llm.reset_context();
+        window_manager.show_popup("LLM Context Reset", "Conversation context has been reset.")?;
+        Ok(true)
+    }
+
+    fn execute_shell_command(command: &str) -> Result<String> {
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| format!("Failed to execute command: {}", command))?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Ok(stdout.trim().to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow::anyhow!("Command failed: {}", stderr))
+        }
+    }
 }
 
 impl HookManager {
@@ -148,6 +260,7 @@ impl HookManager {
         HookManager {
             hooks: HashMap::new(),
             window_manager: WindowManager::default(),
+            llm_service: None,
         }
     }
 
@@ -157,6 +270,10 @@ impl HookManager {
             manager.add_hook(config);
         }
         manager
+    }
+
+    pub fn set_llm_service(&mut self, llm_service: Arc<Mutex<LlmService>>) {
+        self.llm_service = Some(llm_service);
     }
 
     pub fn add_hook(&mut self, config: HookConfig) {
@@ -185,10 +302,10 @@ impl HookManager {
         }
     }
 
-    pub fn process_key(&mut self, key: &KeyInput) -> Result<bool> {
+    pub async fn process_key(&mut self, key: &KeyInput) -> Result<bool> {
         for hook in self.hooks.values() {
             if hook.matches(key) {
-                match hook.execute(key, &mut self.window_manager) {
+                match hook.execute(key, &mut self.window_manager, &self.llm_service).await {
                     Ok(consumed) => {
                         if consumed {
                             return Ok(true); // Key was consumed by hook
@@ -225,6 +342,20 @@ pub fn create_default_hooks() -> Vec<HookConfig> {
             key_combination: "ctrl+;".to_string(),
             action: "fn:show_help".to_string(),
             description: Some("Show help information".to_string()),
+            enabled: true,
+        },
+        HookConfig {
+            name: "llm_prompt".to_string(),
+            key_combination: "ctrl+shift+l".to_string(),
+            action: "llm:prompt".to_string(),
+            description: Some("Open LLM prompt input".to_string()),
+            enabled: true,
+        },
+        HookConfig {
+            name: "llm_reset".to_string(),
+            key_combination: "ctrl+shift+q".to_string(),
+            action: "llm:reset".to_string(),
+            description: Some("Reset LLM conversation context".to_string()),
             enabled: true,
         },
         HookConfig {

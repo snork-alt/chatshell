@@ -3,6 +3,7 @@ mod pty;
 mod terminal;
 mod hooks;
 mod window;
+mod llm;
 
 use anyhow::{Context, Result};
 use clap::{Arg, Command};
@@ -15,9 +16,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
+use tokio::sync::Mutex;
 
 use config::Config;
 use hooks::{HookManager, create_default_hooks};
+use llm::{LlmService, LlmConfig};
 use pty::PtySession;
 use terminal::{Terminal, KeyInput};
 
@@ -27,6 +30,7 @@ struct ChatShell {
     terminal: Terminal,
     pty: PtySession,
     hook_manager: HookManager,
+    llm_service: Option<Arc<Mutex<LlmService>>>,
     running: Arc<AtomicBool>,
 }
 
@@ -59,7 +63,27 @@ impl ChatShell {
         Self::setup_signal_handlers(running.clone())?;
 
         // Initialize hook manager
-        let hook_manager = HookManager::from_configs(config.hooks.clone());
+        let mut hook_manager = HookManager::from_configs(config.hooks.clone());
+
+        // Initialize LLM service if API key is available
+        let llm_service = if !config.llm.api_key.is_empty() {
+            match LlmService::new(config.llm.clone()) {
+                Ok(service) => {
+                    let service = Arc::new(Mutex::new(service));
+                    hook_manager.set_llm_service(service.clone());
+                    Some(service)
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to initialize LLM service: {}", e);
+                    eprintln!("LLM features will be disabled. Please check your configuration.");
+                    None
+                }
+            }
+        } else {
+            eprintln!("Warning: OpenAI API key not found. LLM features will be disabled.");
+            eprintln!("Set OPENAI_API_KEY environment variable or configure it in the config file.");
+            None
+        };
 
         // Resize PTY to match terminal size
         let (cols, rows) = terminal.size()?;
@@ -70,6 +94,7 @@ impl ChatShell {
             terminal,
             pty,
             hook_manager,
+            llm_service,
             running,
         })
     }
@@ -105,6 +130,9 @@ impl ChatShell {
 
     pub async fn run(&mut self) -> Result<()> {
         println!("ChatShell started. Press Ctrl+; for help.");
+        if self.llm_service.is_some() {
+            println!("LLM Assistant enabled. Press Ctrl+Shift+L to open prompt.");
+        }
         
         // Create channels for communication between tasks
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -158,9 +186,9 @@ impl ChatShell {
                 if !running_clone.load(Ordering::Relaxed) {
                     break;
                 }
-
+                
                 let mut file = unsafe { std::fs::File::from_raw_fd(pty_fd_write) };
-                if file.write_all(&data).is_err() {
+                if let Err(_) = file.write_all(&data) {
                     running_clone.store(false, Ordering::Relaxed);
                     break;
                 }
@@ -172,26 +200,22 @@ impl ChatShell {
         while self.running.load(Ordering::Relaxed) {
             select! {
                 // Handle terminal input
-                _ = self.handle_terminal_input(&input_tx) => {},
+                _ = self.handle_terminal_input(&input_tx) => {
+                    // Error handling is done inside the function
+                }
                 
                 // Handle shell output
-                output = output_rx.recv() => {
-                    if let Some(data) = output {
-                        if self.terminal.write(&data).is_err() {
+                output_data = output_rx.recv() => {
+                    if let Some(data) = output_data {
+                        if let Err(e) = self.terminal.write(&data) {
+                            eprintln!("Failed to write to terminal: {}", e);
                             break;
                         }
-                    } else {
-                        break; // Channel closed
                     }
                 }
                 
-                // Check if child process is still alive
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if !self.pty.is_child_alive() {
-                        println!("\rShell process ended.");
-                        break;
-                    }
-                }
+                // Small delay to prevent busy waiting
+                _ = tokio::time::sleep(Duration::from_millis(1)) => {}
             }
         }
 
@@ -207,7 +231,7 @@ impl ChatShell {
                     let key_input = KeyInput::from_event(key_event);
                     
                     // Check if any hook should handle this key
-                    match self.hook_manager.process_key(&key_input) {
+                    match self.hook_manager.process_key(&key_input).await {
                         Ok(true) => {
                             // Hook consumed the key, don't forward to shell
                             return Ok(());
@@ -264,7 +288,7 @@ impl ChatShell {
 async fn main() -> Result<()> {
     let matches = Command::new("chatshell")
         .version("0.1.0")
-        .about("A transparent shell wrapper with hooks and plugins")
+        .about("A transparent shell wrapper with hooks and LLM integration")
         .arg(
             Arg::new("config")
                 .short('c')
@@ -297,28 +321,16 @@ async fn main() -> Result<()> {
         config.save_to_file(&config_path)?;
         
         println!("Created configuration file at: {}", config_path);
-        println!("Edit this file to customize your shell and hooks.");
+        println!("Edit this file to customize your shell, hooks, and LLM settings.");
+        println!("Set OPENAI_API_KEY environment variable to enable LLM features.");
         return Ok(());
     }
 
     // Create and run ChatShell
-    let config_path = matches.get_one::<String>("config").cloned();
-    let mut shell = ChatShell::new(config_path).await?;
-
-    // Override shell if specified in command line
-    if let Some(shell_cmd) = matches.get_one::<String>("shell") {
-        shell.config.shell.command = shell_cmd.clone();
-        shell.config.shell.args = vec!["-i".to_string()]; // Interactive mode
-    }
-
-    // Run the shell wrapper
-    match shell.run().await {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            eprintln!("ChatShell error: {}", e);
-            std::process::exit(1);
-        }
-    }
+    let config_path = matches.get_one::<String>("config").map(|s| s.clone());
+    let mut chatshell = ChatShell::new(config_path).await?;
+    
+    chatshell.run().await
 }
 
 #[cfg(test)]
